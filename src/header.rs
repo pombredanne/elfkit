@@ -4,28 +4,28 @@ use std::io::BufWriter;
 use error::Error;
 use types;
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub struct Header {
-    pub ident_magic: [u8; 4],
-    pub ident_class: types::Class,
-    pub ident_endianness: types::Endianness,
-    pub ident_version: u8, // 1
-    pub ident_abi: types::Abi,
-    pub ident_abiversion: u8,
+    pub ident_magic:        [u8; 4],
+    pub ident_class:        types::Class,
+    pub ident_endianness:   types::Endianness,
+    pub ident_version:      u8, // 1
+    pub ident_abi:          types::Abi,
+    pub ident_abiversion:   u8,
 
-    pub etype: types::ElfType,
-    pub machine: types::Machine,
-    pub version: u32, //1
-    pub entry: u64,   //program counter starts here
-    pub phoff: u64,   //offset of program header table
-    pub shoff: u64,   //offset of section header table
-    pub flags: types::HeaderFlags,
-    pub ehsize: u16,    //size of this header (who cares?)
-    pub phentsize: u16, //the size of a program header table entry
-    pub phnum: u16,     //the number of entries in the program header table
-    pub shentsize: u16, //the size of a section header table entry
-    pub shnum: u16,     //the number of entries in the section header table
-    pub shstrndx: u16,  //where to find section names
+    pub etype:      types::ElfType,
+    pub machine:    types::Machine,
+    pub version:    u32, //1
+    pub entry:      u64, //program counter starts here
+    pub phoff:      u64, //offset of program header table
+    pub shoff:      u64, //offset of section header table
+    pub flags:      types::HeaderFlags,
+    pub ehsize:     u16, //size of this header (who cares?)
+    pub phentsize:  u16, //the size of a program header table entry
+    pub phnum:      u16, //the number of entries in the program header table
+    pub shentsize:  u16, //the size of a section header table entry
+    pub shnum:      u16, //the number of entries in the section header table
+    pub shstrndx:   u16, //where to find section names
 }
 
 impl Default for Header {
@@ -119,12 +119,12 @@ impl Header {
         //    None => return Err(Error::InvalidHeaderFlags(reb)),
         //};
 
-        r.ehsize = elf_read_u16!(r, io)?;
+        r.ehsize    = elf_read_u16!(r, io)?;
         r.phentsize = elf_read_u16!(r, io)?;
-        r.phnum = elf_read_u16!(r, io)?;
+        r.phnum     = elf_read_u16!(r, io)?;
         r.shentsize = elf_read_u16!(r, io)?;
-        r.shnum = elf_read_u16!(r, io)?;
-        r.shstrndx = elf_read_u16!(r, io)?;
+        r.shnum     = elf_read_u16!(r, io)?;
+        r.shstrndx  = elf_read_u16!(r, io)?;
 
         Ok(r)
     }

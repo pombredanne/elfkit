@@ -5,22 +5,23 @@ use dynamic::Dynamic;
 use symbol::Symbol;
 use strtab::Strtab;
 use types;
+use std;
 
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::io::BufWriter;
 
 #[derive(Default, Debug, Clone)]
 pub struct SectionHeader {
-    pub name: u32,
-    pub shtype: types::SectionType,
-    pub flags: types::SectionFlags,
-    pub addr: u64,
-    pub offset: u64,
-    pub size: u64,
-    pub link: u32,
-    pub info: u32,
-    pub addralign: u64,
-    pub entsize: u64,
+    pub name:       u32,
+    pub shtype:     types::SectionType,
+    pub flags:      types::SectionFlags,
+    pub addr:       u64,
+    pub offset:     u64,
+    pub size:       u64,
+    pub link:       u32,
+    pub info:       u32,
+    pub addralign:  u64,
+    pub entsize:    u64,
 }
 
 impl SectionHeader {
@@ -82,6 +83,7 @@ impl SectionHeader {
 #[derive(Debug, Clone)]
 pub enum SectionContent {
     None,
+    Unloaded,
     Raw(Vec<u8>),
     Relocations(Vec<Relocation>),
     Symbols(Vec<Symbol>),
@@ -145,6 +147,7 @@ impl SectionContent {
     }
     pub fn size(&self, eh: &Header) -> usize {
         match self {
+            &SectionContent::Unloaded => panic!("cannot size unloaded section"),
             &SectionContent::None => 0,
             &SectionContent::Raw(ref v) => v.len(),
             &SectionContent::Dynamic(ref v) => v.len() * Dynamic::entsize(eh),
@@ -157,9 +160,9 @@ impl SectionContent {
 
 #[derive(Debug, Default, Clone)]
 pub struct Section {
-    pub header: SectionHeader,
-    pub name: String,
-    pub content: SectionContent,
+    pub header:     SectionHeader,
+    pub name:       Vec<u8>,
+    pub content:    SectionContent,
 }
 
 
@@ -168,12 +171,12 @@ impl Section {
         self.content.size(eh)
     }
     pub fn new(
-        name: String,
-        shtype: types::SectionType,
-        flags: types::SectionFlags,
-        content: SectionContent,
-        link: u32,
-        info: u32,
+        name:       Vec<u8>,
+        shtype:     types::SectionType,
+        flags:      types::SectionFlags,
+        content:    SectionContent,
+        link:       u32,
+        info:       u32,
     ) -> Section {
         Section {
             name: name,
@@ -199,6 +202,9 @@ impl Section {
         mut linked: Option<&mut SectionContent>,
     ) -> Result<(), Error> {
         match self.content {
+            SectionContent::Unloaded => {
+                return Err(Error::SyncingUnloadedSection);
+            },
             SectionContent::Relocations(_) => {
                 self.header.entsize = Relocation::entsize(eh) as u64;
             }
@@ -214,7 +220,7 @@ impl Section {
                 }
                 self.header.entsize = Symbol::entsize(eh) as u64;
             }
-            SectionContent::Dynamic(ref vv) => {
+            SectionContent::Dynamic(ref mut vv) => {
                 for v in vv {
                     v.sync(linked.as_mut().map(|r| &mut **r), eh)?;
                 }
@@ -230,4 +236,96 @@ impl Section {
         }
         Ok(())
     }
+
+    pub fn from_reader<T>(
+        &mut self,
+        mut io: T,
+        linked: Option<&Section>,
+        eh: &Header,
+    ) -> Result<(), Error> where T: Read + Seek {
+        match self.content {
+            SectionContent::Unloaded => {},
+            _ => return Ok(()),
+        };
+        io.seek(SeekFrom::Start(self.header.offset))?;
+        let mut io = io.take(self.header.size);
+        let linked = linked.map(|s|&s.content);
+        self.content = match self.header.shtype {
+            types::SectionType::NOBITS => {
+                SectionContent::None
+            },
+            types::SectionType::STRTAB => {
+                Strtab::from_reader(io, linked, eh)?
+            }
+            types::SectionType::RELA => {
+                Relocation::from_reader(io, linked, eh)?
+            }
+            types::SectionType::SYMTAB | types::SectionType::DYNSYM => {
+                Symbol::from_reader(io, linked, eh)?
+            }
+            types::SectionType::DYNAMIC => {
+                Dynamic::from_reader(io, linked, eh)?
+            }
+            _ => {
+                let mut bb = vec![0; self.header.size as usize];
+                io.read_exact(&mut bb)?;
+                SectionContent::Raw(bb)
+            }
+        };
+        Ok(())
+    }
+
+
+    pub fn to_writer<T>(
+        &mut self,
+        mut io: T,
+        eh: &Header,
+    ) -> Result<(), Error> where T: Write + Seek {
+        match self.content {
+            SectionContent::Unloaded => return Ok(()),
+            _ => {},
+        };
+        io.seek(SeekFrom::Start(self.header.offset))?;
+
+        let rs = match std::mem::replace(&mut self.content, SectionContent::Unloaded) {
+            SectionContent::Unloaded => {
+                return Err(Error::WritingUnloadedSection);
+            },
+            SectionContent::Relocations(vv) => {
+                let mut rs = 0;
+                for v in vv {
+                    rs += v.to_writer(&mut io, eh)?;
+                }
+                rs
+            }
+            SectionContent::Symbols(vv) => {
+                let mut rs = 0;
+                for v in vv {
+                    rs += v.to_writer(&mut io, eh)?;
+                }
+                rs
+            }
+            SectionContent::Dynamic(vv) => {
+                let mut rs = 0;
+                for v in vv {
+                    rs += v.to_writer(&mut io, eh)?;
+                }
+                rs
+            }
+            SectionContent::Strtab(v) => {
+                v.to_writer(&mut io, eh)?
+            }
+            SectionContent::None => {
+                //not really, this is just to make the assert work
+                self.header.size as usize
+            },
+            SectionContent::Raw(raw) => {
+                io.write(&raw)?
+            }
+        };
+        assert_eq!(rs as u64, self.header.size);
+
+        Ok(())
+    }
+
 }

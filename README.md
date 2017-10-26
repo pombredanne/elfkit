@@ -24,7 +24,7 @@ there's also a prettier version of readelf showing of parsing capabilities
 cargo run --example readelf ./tests/samples/amd64_exe
 ```
 
-![screenshot](/examples/readelf-screenshot.png?raw=true)
+![screenshot](/bin/readelf-screenshot.png?raw=true)
 
 
 implementation status

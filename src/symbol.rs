@@ -20,29 +20,29 @@ impl Default for SymbolSectionIndex {
 
 #[derive(Debug, Default, Clone)]
 pub struct Symbol {
-    pub shndx: SymbolSectionIndex,
-    pub value: u64,
-    pub size: u64,
+    pub shndx:  SymbolSectionIndex,
+    pub value:  u64,
+    pub size:   u64,
 
-    pub name: String,
-    pub stype: types::SymbolType,
-    pub bind: types::SymbolBind,
-    pub vis: types::SymbolVis,
+    pub name:   Vec<u8>,
+    pub stype:  types::SymbolType,
+    pub bind:   types::SymbolBind,
+    pub vis:    types::SymbolVis,
 }
 
 impl Symbol {
     fn from_val(
-        tab: Option<&Strtab>,
-        _name: u32,
-        info: u8,
-        other: u8,
-        shndx: u16,
-        value: u64,
-        size: u64,
+        tab:    Option<&Strtab>,
+        _name:  u32,
+        info:   u8,
+        other:  u8,
+        shndx:  u16,
+        value:  u64,
+        size:   u64,
     ) -> Result<Symbol, Error> {
         let name = match tab {
             Some(tab) => tab.get(_name as usize),
-            None => String::default(),
+            None => Vec::default(),
         };
 
         let shndx = match shndx {
@@ -50,7 +50,7 @@ impl Symbol {
             65521 => SymbolSectionIndex::Absolute,
             65522 => SymbolSectionIndex::Common,
             _ if shndx > 0 && shndx < 6552 => SymbolSectionIndex::Section(shndx),
-            _ => return Err(Error::InvalidSymbolShndx(name.clone(), shndx)),
+            _ => return Err(Error::InvalidSymbolShndx(String::from_utf8_lossy(&name).into_owned(), shndx)),
         };
 
         let reb = info & 0xf;
@@ -140,21 +140,11 @@ impl Symbol {
     pub fn to_writer<W>(
         &self,
         mut io: W,
-        linked: Option<&mut SectionContent>,
         eh: &Header,
-    ) -> Result<(), Error>
+    ) -> Result<(usize), Error>
     where
         W: Write,
     {
-        match linked {
-            Some(&mut SectionContent::Strtab(ref mut strtab)) => {
-                let off = strtab.insert(self.name.bytes().collect()) as u32;
-                elf_write_u32!(eh, io, off)?;
-            }
-            _ => return Err(Error::LinkedSectionIsNotStrtab("writing symbols")),
-        }
-
-
         let info = (self.bind.to_u8().unwrap() << 4) + (self.stype.to_u8().unwrap() & 0xf);
         let other = self.vis.to_u8().unwrap();
 
@@ -168,27 +158,30 @@ impl Symbol {
             }
         };
 
-        match eh.ident_class {
+        Ok(match eh.ident_class {
             types::Class::Class64 => {
                 io.write(&[info, other])?;
                 elf_write_u16!(eh, io, shndx)?;
                 elf_write_u64!(eh, io, self.value)?;
                 elf_write_u64!(eh, io, self.size)?;
+
+                2+2+8+8
             }
             types::Class::Class32 => {
                 elf_write_u32!(eh, io, self.value as u32)?;
                 elf_write_u32!(eh, io, self.size as u32)?;
                 io.write(&[info, other])?;
                 elf_write_u16!(eh, io, shndx)?;
+
+                4+4+2+2
             }
-        };
-        Ok(())
+        })
     }
 
     pub fn sync(&self, linked: Option<&mut SectionContent>, _: &Header) -> Result<(), Error> {
         match linked {
             Some(&mut SectionContent::Strtab(ref mut strtab)) => {
-                strtab.insert(self.name.bytes().collect());
+                strtab.insert(&self.name);
             }
             _ => return Err(Error::LinkedSectionIsNotStrtab("syncing symbols")),
         }
@@ -235,7 +228,7 @@ pub fn symhash(eh: &Header, symbols: &Vec<Symbol>, link: u32) -> Result<Section,
     }
 
     Ok(Section {
-        name: String::from(".hash"),
+        name: b".hash".to_vec(),
         header: SectionHeader {
             name: 0,
             shtype: types::SectionType::HASH,

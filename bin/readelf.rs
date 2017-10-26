@@ -21,7 +21,7 @@ fn main() {
     let filename = env::args().nth(1).unwrap();
     let mut file = File::open(filename).unwrap();
     let mut elf = Elf::from_reader(&mut file).unwrap();
-    elf.load_all().unwrap();
+    elf.load_all(&mut file).unwrap();
 
     println!("{}", "ELF Header:".bold());
     println!(
@@ -102,13 +102,13 @@ fn main() {
         elf.header.shoff
     );
     println!(
-        "  [Nr] Name                     Type           Address          Offset   Size     EntS \
+        "  [Nr] Name             Type           Address          Offset   Size     EntS \
          Flg Lnk Inf Al"
     );
 
     for (i, section) in elf.sections.iter().enumerate() {
         println!(
-            "  [{:>2}] {:<24.24} {} {} {} {} {} {:<3} {:<3.3} {:<3} {:<2.2}",
+            "  [{:>2}] {:<16.16} {} {} {} {} {} {:<3} {:<3.3} {:<3} {:<2.2}",
             i,
             section.name.bold(),
             match section.header.shtype.typename(&elf.header) {
@@ -305,7 +305,7 @@ fn main() {
                         .and_then(|sec| sec.content.as_symbols())
                         .and_then(|symbols| symbols.get(reloc.sym as usize))
                         .and_then(|symbol| if symbol.name.len() > 0 {
-                            print!("{: <20.20} ", symbol.name);
+                            print!("{: <20.20} ", String::from_utf8_lossy(&symbol.name));
                             Some(())
                         } else {
                             None
@@ -349,7 +349,7 @@ fn main() {
                             SymbolSectionIndex::Section(i) => format!("{}", i),
                             SymbolSectionIndex::Global(i) => format!("g{}", i),
                         },
-                        symbol.name
+                        String::from_utf8_lossy(&symbol.name)
                     );
                 }
             }
@@ -368,7 +368,7 @@ fn main() {
                         format!("{:?}", dyn.dhtype),
                         match dyn.content {
                             DynamicContent::None => String::default(),
-                            DynamicContent::String(ref s) => s.clone(),
+                            DynamicContent::String(ref s) => String::from_utf8_lossy(&s.0).into_owned(),
                             DynamicContent::Address(u) => hextab(16, u),
                             DynamicContent::Flags1(v) => format!("{:?}", v),
                         }

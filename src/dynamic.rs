@@ -6,7 +6,7 @@ use num_traits::{FromPrimitive, ToPrimitive};
 #[derive(Debug, Clone)]
 pub enum DynamicContent {
     None,
-    String(String),
+    String((Vec<u8>,Option<u64>)),
     Address(u64),
     Flags1(types::DynamicFlags1),
 }
@@ -57,8 +57,8 @@ impl Dynamic {
                     r.push(Dynamic {
                         dhtype: types::DynamicType::NEEDED,
                         content: DynamicContent::String(match strtab {
-                            None => String::default(),
-                            Some(s) => s.get(val as usize),
+                            None => (Vec::default(),None),
+                            Some(s) => (s.get(val as usize), Some(val)),
                         }),
                     });
                 }
@@ -87,9 +87,8 @@ impl Dynamic {
     pub fn to_writer<W>(
         &self,
         mut io: W,
-        linked: Option<&mut SectionContent>,
         eh: &Header,
-    ) -> Result<(), Error>
+    ) -> Result<(usize), Error>
     where
         W: Write,
     {
@@ -99,12 +98,9 @@ impl Dynamic {
             DynamicContent::None => {
                 elf_write_uclass!(eh, io, 0)?;
             }
-            DynamicContent::String(ref s) => match linked {
-                Some(&mut SectionContent::Strtab(ref mut dynstr)) => {
-                    let off = dynstr.insert(s.bytes().collect()) as u64;
-                    elf_write_uclass!(eh, io, off)?;
-                }
-                _ => elf_write_uclass!(eh, io, 0)?,
+            DynamicContent::String(ref s) => match s.1 {
+                Some(val) => elf_write_uclass!(eh, io, val)?,
+                None      => return Err(Error::WritingNotSynced),
             },
             DynamicContent::Address(ref v) => {
                 elf_write_uclass!(eh, io, *v)?;
@@ -113,14 +109,14 @@ impl Dynamic {
                 elf_write_uclass!(eh, io, v.bits())?;
             }
         }
-        Ok(())
+        Ok(Dynamic::entsize(eh))
     }
 
-    pub fn sync(&self, linked: Option<&mut SectionContent>, _: &Header) -> Result<(), Error> {
+    pub fn sync(&mut self, linked: Option<&mut SectionContent>, _: &Header) -> Result<(), Error> {
         match self.content {
-            DynamicContent::String(ref s) => match linked {
+            DynamicContent::String(ref mut s) => match linked {
                 Some(&mut SectionContent::Strtab(ref mut strtab)) => {
-                    strtab.insert(s.bytes().collect());
+                    s.1 = Some(strtab.insert(&s.0) as u64);
                 }
                 _ => return Err(Error::LinkedSectionIsNotStrtab("syncing dynamic")),
             },

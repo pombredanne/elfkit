@@ -30,6 +30,10 @@ pub enum Error {
     InvalidSymbolShndx(String, u16),
     DynsymInStaticLibrary,
     SymbolSectionIndexExtendedCannotBeWritten,
+    WritingNotSynced,
+    SyncingUnloadedSection,
+    WritingUnloadedSection,
+    NoSymbolsInObject,
 }
 
 impl From<::std::io::Error> for Error {

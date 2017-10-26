@@ -24,8 +24,8 @@ pub fn segments(elf: &Elf) -> Result<Vec<SegmentHeader>, Error> {
     for i in 0..elf.sections.len() {
         let section = &elf.sections[i];
 
-        match section.name.as_ref() {
-            ".dynamic" => {
+        match section.name.as_slice() {
+            b".dynamic" => {
                 r.push(SegmentHeader {
                     phtype: types::SegmentType::DYNAMIC,
                     flags: types::SegmentFlags::READABLE | types::SegmentFlags::WRITABLE,
@@ -37,7 +37,7 @@ pub fn segments(elf: &Elf) -> Result<Vec<SegmentHeader>, Error> {
                     align: 0x8,
                 });
             }
-            ".interp" => {
+            b".interp" => {
                 r.push(SegmentHeader {
                     phtype: types::SegmentType::INTERP,
                     flags: types::SegmentFlags::READABLE,
@@ -61,7 +61,7 @@ pub fn segments(elf: &Elf) -> Result<Vec<SegmentHeader>, Error> {
                 vaddr: section.header.addr,
                 paddr: section.header.addr,
                 memsz: section.header.size,
-                align: 0x20,
+                align: 0x10,
             });
         }
 
@@ -158,14 +158,14 @@ pub fn dynamic(elf: &Elf) -> Result<Vec<Dynamic>, Error> {
     let mut r = Vec::new();
 
     for sec in &elf.sections {
-        match sec.name.as_ref() {
-            ".hash" => {
+        match sec.name.as_slice() {
+            b".hash" => {
                 r.push(Dynamic {
                     dhtype: types::DynamicType::HASH,
                     content: DynamicContent::Address(sec.header.addr),
                 });
             }
-            ".dynstr" => {
+            b".dynstr" => {
                 r.push(Dynamic {
                     dhtype: types::DynamicType::STRTAB,
                     content: DynamicContent::Address(sec.header.addr),
@@ -176,7 +176,7 @@ pub fn dynamic(elf: &Elf) -> Result<Vec<Dynamic>, Error> {
                     content: DynamicContent::Address(sec.header.size),
                 });
             }
-            ".dynsym" => {
+            b".dynsym" => {
                 r.push(Dynamic {
                     dhtype: types::DynamicType::SYMTAB,
                     content: DynamicContent::Address(sec.header.addr),
@@ -186,7 +186,7 @@ pub fn dynamic(elf: &Elf) -> Result<Vec<Dynamic>, Error> {
                     content: DynamicContent::Address(sec.header.entsize),
                 });
             }
-            ".rela.dyn" => {
+            b".rela.dyn" => {
                 r.push(Dynamic {
                     dhtype: types::DynamicType::RELA,
                     content: DynamicContent::Address(sec.header.addr),

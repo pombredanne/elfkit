@@ -6,18 +6,20 @@ extern crate enum_primitive_derive;
 extern crate num_traits;
 #[macro_use]
 pub mod utils;
-pub mod relocation;
-pub mod types;
-pub mod symbol;
+
 pub mod dynamic;
-pub mod strtab;
-pub mod linker;
+pub mod elf;
 pub mod error;
+pub mod filetype;
 pub mod header;
+pub mod linker;
+pub mod loader;
+pub mod relocation;
 pub mod section;
 pub mod segment;
-pub mod elf;
-pub mod filetype;
+pub mod strtab;
+pub mod symbol;
+pub mod types;
 
 pub use relocation::Relocation;
 pub use symbol::{Symbol, SymbolSectionIndex};
