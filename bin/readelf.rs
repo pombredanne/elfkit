@@ -110,7 +110,7 @@ fn main() {
         println!(
             "  [{:>2}] {:<16.16} {} {} {} {} {} {:<3} {:<3.3} {:<3} {:<2.2}",
             i,
-            section.name.bold(),
+            String::from_utf8_lossy(&section.name).bold(),
             match section.header.shtype.typename(&elf.header) {
                 Some(s) => format!("{:<14.14}", s),
                 None => hextab(14, section.header.shtype.to_u32()),
@@ -183,16 +183,16 @@ fn main() {
     println!("{}:", "File Layout".bold());
 
     let mut fls = vec![
-        ("elf header", 0, elf.header.ehsize as u64),
+        (String::from("elf header"), 0, elf.header.ehsize as u64),
         (
-            "section headers",
+            String::from("section headers"),
             elf.header.shoff,
             elf.header.shentsize as u64 * elf.header.shnum as u64,
         ),
     ];
     if elf.header.phoff > 0 {
         fls.push((
-            "segment headers",
+            String::from("segment headers"),
             elf.header.phoff,
             (elf.header.phentsize * elf.header.phnum) as u64,
         ));
@@ -203,7 +203,7 @@ fn main() {
             continue;
         }
         fls.push((
-            &section.name,
+            String::from_utf8_lossy(&section.name).into_owned(),
             section.header.offset,
             if section.header.shtype == types::SectionType::NOBITS {
                 0
@@ -239,10 +239,10 @@ fn main() {
 
 
     let mut cfileoff = 0;
-    let fls_intermediate = fls.drain(..).collect::<Vec<(&str, u64, u64)>>();
+    let fls_intermediate = fls.drain(..).collect::<Vec<(String, u64, u64)>>();
     for (name, off, size) in fls_intermediate {
         if cfileoff < off {
-            fls.push(("", cfileoff, off - cfileoff));
+            fls.push((String::default(), cfileoff, off - cfileoff));
         }
         fls.push((name, off, size));
         cfileoff = off + size;
@@ -251,7 +251,7 @@ fn main() {
     if let Some(&(_, off, size)) = fls.last() {
         let filelen = file.metadata().unwrap().len();
         if off + size < filelen {
-            fls.push(("", off + size, filelen - (off + size)));
+            fls.push((String::default(), off + size, filelen - (off + size)));
         }
     }
 
@@ -288,7 +288,7 @@ fn main() {
                 println!("");
                 println!(
                     "{} relocation section at offset 0x{:x}:",
-                    section.name.bold(),
+                    String::from_utf8_lossy(&section.name).bold(),
                     section.header.offset
                 );
                 println!("  Offset           Type            Symbol               Addend");
@@ -328,7 +328,7 @@ fn main() {
                 println!("");
                 println!(
                     "{} symbols section at offset 0x{:x}:",
-                    section.name.bold(),
+                    String::from_utf8_lossy(&section.name).bold(),
                     section.header.offset
                 );
                 println!("  Num: Value             Size Type    Bind   Vis      Ndx Name");
@@ -347,7 +347,6 @@ fn main() {
                             SymbolSectionIndex::Absolute => String::from("ABS"),
                             SymbolSectionIndex::Common => String::from("COM"),
                             SymbolSectionIndex::Section(i) => format!("{}", i),
-                            SymbolSectionIndex::Global(i) => format!("g{}", i),
                         },
                         String::from_utf8_lossy(&symbol.name)
                     );
@@ -357,7 +356,7 @@ fn main() {
                 println!("");
                 println!(
                     "{} dynamic linker section at offset 0x{:x}:",
-                    section.name.bold(),
+                    String::from_utf8_lossy(&section.name).bold(),
                     section.header.offset
                 );
                 println!("  Tag          Value");
@@ -375,12 +374,12 @@ fn main() {
                     );
                 }
             }
-            SectionContent::Raw(ref s) => match section.name.as_ref() {
-                ".interp" => {
+            SectionContent::Raw(ref s) => match section.name.as_slice() {
+                b".interp" => {
                     println!("");
                     println!(
                         "{} program interpreter section at offset 0x{:x}:",
-                        section.name.bold(),
+                        String::from_utf8_lossy(&section.name).bold(),
                         section.header.offset
                     );
                     println!("  {}", String::from_utf8_lossy(s));

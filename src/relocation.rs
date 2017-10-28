@@ -2,8 +2,9 @@ use std::io::{Read, Write};
 use {Error, Header, SectionContent};
 use types;
 use num_traits::{FromPrimitive, ToPrimitive};
+use symbol::Symbol;
 
-/**
+/*
 A Represents the addend used to compute the value of the relocatable field.
 
 B Represents the base address at which a shared object has been loaded into memory
@@ -121,7 +122,7 @@ impl Relocation {
     pub fn entsize(eh: &Header) -> usize {
         match eh.machine {
             types::Machine::X86_64 => 3 * 8,
-            _ => 0,
+            _ => panic!("relocs for machine '{:?}' not implemented", eh.machine),
         }
     }
 

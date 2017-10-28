@@ -1,8 +1,10 @@
 use std::io::{Read, Write};
 use {types, Error, Header, SectionContent};
+use utils::hextab;
 use num_traits::{FromPrimitive, ToPrimitive};
 use strtab::Strtab;
 use section::{Section, SectionHeader};
+use std::fmt;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum SymbolSectionIndex {
@@ -10,7 +12,6 @@ pub enum SymbolSectionIndex {
     Undefined,    // 0
     Absolute,     // 65521,
     Common,       // 6552,
-    Global(u64),
 }
 impl Default for SymbolSectionIndex {
     fn default() -> SymbolSectionIndex {
@@ -18,7 +19,7 @@ impl Default for SymbolSectionIndex {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct Symbol {
     pub shndx:  SymbolSectionIndex,
     pub value:  u64,
@@ -28,6 +29,28 @@ pub struct Symbol {
     pub stype:  types::SymbolType,
     pub bind:   types::SymbolBind,
     pub vis:    types::SymbolVis,
+
+    pub _name:  u32,
+}
+
+impl fmt::Debug for Symbol {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f,
+               "  {} {:>5.5} {:<7.7} {:<6.6} {:<8.8} {:<3.3} {} ",
+               hextab(16, self.value),
+               self.size,
+               format!("{:?}", self.stype),
+               format!("{:?}", self.bind),
+               format!("{:?}", self.vis),
+               match self.shndx {
+                   SymbolSectionIndex::Undefined => String::from("UND"),
+                   SymbolSectionIndex::Absolute => String::from("ABS"),
+                   SymbolSectionIndex::Common => String::from("COM"),
+                   SymbolSectionIndex::Section(i) => format!("{}", i),
+               },
+               String::from_utf8_lossy(&self.name)
+              )
+    }
 }
 
 impl Symbol {
@@ -80,6 +103,8 @@ impl Symbol {
             stype: stype,
             bind: bind,
             vis: vis,
+
+            _name: _name,
         })
     }
 
@@ -108,29 +133,30 @@ impl Symbol {
         let mut b = vec![0; Self::entsize(eh)];
         while io.read(&mut b)? > 0 {
             let mut br = &b[..];
-            let _name = elf_read_u32!(eh, br)?;
+            elf_dispatch_endianness!(eh => {
+                let _name = read_u32(&mut br)?;
+                r.push(match eh.ident_class {
+                    types::Class::Class64 => {
+                        let info = b[4];
+                        let other = b[5];
+                        br = &b[6..];
+                        let shndx = read_u16(&mut br)?;
+                        let value = read_u64(&mut br)?;
+                        let size  = read_u64(&mut br)?;
 
-            r.push(match eh.ident_class {
-                types::Class::Class64 => {
-                    let info = b[4];
-                    let other = b[5];
-                    br = &b[6..];
-                    let shndx = elf_read_u16!(eh, br)?;
-                    let value = elf_read_u64!(eh, br)?;
-                    let size = elf_read_u64!(eh, br)?;
+                        Symbol::from_val(tab, _name, info, other, shndx, value, size)?
+                    }
+                    types::Class::Class32 => {
+                        let value = read_u32(&mut br)?;
+                        let size  = read_u32(&mut br)?;
+                        let info  = b[12];
+                        let other = b[13];
+                        br = &b[14..];
+                        let shndx = read_u16(&mut br)?;
 
-                    Symbol::from_val(tab, _name, info, other, shndx, value, size)?
-                }
-                types::Class::Class32 => {
-                    let value = elf_read_u32!(eh, br)?;
-                    let size = elf_read_u32!(eh, br)?;
-                    let info = b[12];
-                    let other = b[13];
-                    br = &b[14..];
-                    let shndx = elf_read_u16!(eh, br)?;
-
-                    Symbol::from_val(tab, _name, info, other, shndx, value as u64, size as u64)?
-                }
+                        Symbol::from_val(tab, _name, info, other, shndx, value as u64, size as u64)?
+                    }
+                })
             })
         }
 
@@ -153,10 +179,9 @@ impl Symbol {
             SymbolSectionIndex::Undefined => 0,
             SymbolSectionIndex::Absolute => 65521,
             SymbolSectionIndex::Common => 65522,
-            SymbolSectionIndex::Global(_) => {
-                return Err(Error::SymbolSectionIndexExtendedCannotBeWritten)
-            }
         };
+
+        elf_write_u32!(eh, io, self._name)?;
 
         Ok(match eh.ident_class {
             types::Class::Class64 => {
@@ -178,10 +203,10 @@ impl Symbol {
         })
     }
 
-    pub fn sync(&self, linked: Option<&mut SectionContent>, _: &Header) -> Result<(), Error> {
+    pub fn sync(&mut self, linked: Option<&mut SectionContent>, _: &Header) -> Result<(), Error> {
         match linked {
             Some(&mut SectionContent::Strtab(ref mut strtab)) => {
-                strtab.insert(&self.name);
+                self._name = strtab.insert(&self.name) as u32;
             }
             _ => return Err(Error::LinkedSectionIsNotStrtab("syncing symbols")),
         }

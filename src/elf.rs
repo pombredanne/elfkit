@@ -3,28 +3,31 @@ use types;
 use error::Error;
 use section::*;
 use segment::*;
+use symbol;
+use section;
 
+use ordermap::{OrderMap};
+use std::collections::hash_map::{self,HashMap};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std;
+use std::iter::FromIterator;
 
+#[derive(Default)]
 pub struct Elf {
     pub header: Header,
     pub segments: Vec<SegmentHeader>,
     pub sections: Vec<Section>,
 }
 
-impl Default for Elf {
-    fn default() -> Self {
-        let r = Elf {
-            header: Header::default(),
-            segments: Vec::default(),
-            sections: Vec::default(),
-        };
-        r
-    }
-}
-
 impl Elf {
+    pub fn from_header(header: Header) -> Self {
+        Self {
+            header:     header,
+            segments:   Vec::new(),
+            sections:   Vec::new(),
+        }
+    }
+
     pub fn from_reader<R>(io: &mut R) -> Result<Elf, Error>
     where
         R: Read + Seek,
@@ -34,28 +37,35 @@ impl Elf {
         // parse segments
         let mut segments = Vec::with_capacity(header.phnum as usize);
         io.seek(SeekFrom::Start(header.phoff))?;
-        for _ in 0..header.phnum {
-            let segment = SegmentHeader::from_reader(io, &header)?;
-            segments.push(segment);
+        let mut buf = vec![0; header.phentsize as usize * header.phnum as usize];
+        {
+            io.read_exact(&mut buf)?;
+            let mut bio = buf.as_slice();
+            for _ in 0..header.phnum {
+                let segment = SegmentHeader::from_reader(&mut bio, &header)?;
+                segments.push(segment);
+            }
         }
 
         // parse section headers
         let mut sections = Vec::with_capacity(header.shnum as usize);
         io.seek(SeekFrom::Start(header.shoff))?;
-        for _ in 0..header.shnum {
-            let sh = SectionHeader::from_reader(io, &header)?;
+        buf.resize(header.shnum as usize * header.shentsize as usize,0);
+        {
+            io.read_exact(&mut buf)?;
+            let mut bio = buf.as_slice();
+            for _ in 0..header.shnum {
+                let sh = SectionHeader::from_reader(&mut bio, &header)?;
 
-            sections.push(Section {
-                name:       Vec::with_capacity(0),
-                content:    SectionContent::Unloaded,
-                header:     sh,
-            });
+                sections.push(Section{
+                    name:       Vec::with_capacity(0),
+                    content:    SectionContent::Unloaded,
+                    header:     sh,
+                });
+            }
         }
 
         // resolve section names
-        // we're not loading shstrtab using section loaders, this is intentional
-        // because Elf::from_reader is used everywhere, even in cases
-        // where the elf file will not be proccesed further after checking what it contains
         let shstrtab = match sections.get(header.shstrndx as usize) {
             None => return Err(Error::MissingShstrtabSection),
             Some(sec) => {
@@ -64,7 +74,7 @@ impl Elf {
                 io.read_exact(&mut shstrtab)?;
                 shstrtab
             },
-        }.clone();
+        };
 
         for ref mut sec in &mut sections {
             sec.name = shstrtab[sec.header.name as usize..]
@@ -162,7 +172,7 @@ impl Elf {
         Ok(())
     }
 
-    pub fn to_writer<R>(&mut self, io: &mut R) -> Result<(), Error>
+    pub fn to_writer<R>(&mut self, mut io: R) -> Result<(), Error>
     where
         R: Write + Seek,
     {
@@ -176,7 +186,7 @@ impl Elf {
         if self.segments.len() > 0 {
             self.header.phoff = off as u64;
             for seg in &self.segments {
-                seg.to_writer(&self.header, io)?;
+                seg.to_writer(&self.header, &mut io)?;
             }
             let at = io.seek(SeekFrom::Current(0))? as usize;
             self.header.phnum = self.segments.len() as u16;
@@ -189,28 +199,12 @@ impl Elf {
         //sections
         sections.sort_unstable_by(|a, b| a.header.offset.cmp(&b.header.offset));
         for sec in sections {
-            let off = io.seek(SeekFrom::Current(0))? as usize;
-
             assert_eq!(
                 io.seek(SeekFrom::Start(sec.header.offset))?,
                 sec.header.offset
             );
-            match sec.content {
-                SectionContent::Raw(ref v) => {
-                    if off > sec.header.offset as usize {
-                        println!(
-                            "BUG: section layout is broken. \
-                             would write section '{}' at position 0x{:x} over previous section \
-                             that ended at 0x{:x}",
-                            String::from_utf8_lossy(&sec.name),
-                            sec.header.offset,
-                            off
-                        );
-                    }
-                    io.write(&v.as_ref())?;
-                }
-                _ => {}
-            }
+
+            sec.to_writer(&mut io, &self.header)?;
         }
 
 
@@ -219,7 +213,7 @@ impl Elf {
             let off = io.seek(SeekFrom::End(0))? as usize;
             self.header.shoff = off as u64;
             for sec in &headers {
-                sec.to_writer(&self.header, io)?;
+                sec.to_writer(&self.header, &mut io)?;
             }
             self.header.shnum = headers.len() as u16;
             self.header.shentsize = SectionHeader::entsize(&self.header) as u16;
@@ -229,10 +223,120 @@ impl Elf {
         self.header.ehsize = self.header.size() as u16;
 
         io.seek(SeekFrom::Start(0))?;
-        self.header.to_writer(io)?;
+        self.header.to_writer(&mut io)?;
 
         Ok(())
     }
+
+    ///gnu ld compatibility. this is very inefficent,
+    ///but not doing this might break some GNU tools that rely on specific gnu-ld behaviour
+    /// - reorder symbols to have GLOBAL last
+    /// - remove original SECTION symbols and add offset to reloc addend instead
+    /// - insert new symbol sections on the top
+    pub fn make_symtab_gnuld_compat(&mut self) {
+        for i in 0..self.sections.len() {
+            if self.sections[i].header.shtype == types::SectionType::SYMTAB {
+                self._make_symtab_gnuld_compat(i);
+            }
+        }
+        self.sync_all();
+    }
+
+    fn _make_symtab_gnuld_compat(&mut self, shndx: usize) {
+
+        let mut original_size = self.sections[shndx].content.as_symbols().unwrap().len();
+
+        let mut symtab_sec = HashMap::new();
+        //I = new index
+        //V.0 = old index
+        //V.1 = sym
+        let mut symtab_remap = Vec::new();
+        for (i, link)  in self.sections[shndx].content.as_symbols_mut().unwrap().drain(..).enumerate() {
+            if link.stype == types::SymbolType::SECTION {
+                symtab_sec.insert(i, link);
+            } else {
+                symtab_remap.push((i, link));
+            }
+        }
+
+        let mut symtab_gs = Vec::new();
+        let mut symtab_ls = Vec::new();
+        for (oi,mut sym) in symtab_remap {
+            if sym.bind == types::SymbolBind::GLOBAL {
+                symtab_gs.push((oi, sym));
+            } else {
+                symtab_ls.push((oi, sym));
+            }
+        }
+        symtab_gs.sort_unstable_by(|a,b|{
+            a.1.value.cmp(&b.1.value)
+        });
+
+
+        symtab_ls.insert(0, (original_size, symbol::Symbol::default()));
+        original_size += 1;
+
+        let mut nu_sec_syms = vec![0];
+        for i in 1..self.sections.len() {
+            symtab_ls.insert(i, (original_size, symbol::Symbol{
+                shndx:  symbol::SymbolSectionIndex::Section(i as u16),
+                value:  0,
+                size:   0,
+                name:   Vec::new(),
+                stype:  types::SymbolType::SECTION,
+                bind:   types::SymbolBind::LOCAL,
+                vis:    types::SymbolVis::DEFAULT,
+                _name:  0,
+            }));
+            nu_sec_syms.push(original_size);
+            original_size += 1;
+        }
+
+        symtab_ls.push((original_size, symbol::Symbol{
+            shndx:  symbol::SymbolSectionIndex::Absolute,
+            value:  0,
+            size:   0,
+            name:   Vec::new(),
+            stype:  types::SymbolType::FILE,
+            bind:   types::SymbolBind::LOCAL,
+            vis:    types::SymbolVis::DEFAULT,
+            _name:  0,
+        }));
+        original_size += 1;
+
+
+        let mut symtab_remap : OrderMap<usize, symbol::Symbol>
+            = OrderMap::from_iter(symtab_ls.into_iter().chain(symtab_gs.into_iter()));
+
+        for sec in &mut self.sections {
+            match sec.header.shtype {
+                types::SectionType::RELA => {
+                    if sec.header.link != shndx as u32{
+                        continue;
+                    }
+                    for reloc in sec.content.as_relocations_mut().unwrap().iter_mut() {
+                        if let Some(secsym) = symtab_sec.get(&(reloc.sym as usize)) {
+                            if let symbol::SymbolSectionIndex::Section(so) = secsym.shndx {
+                                reloc.addend += secsym.value as i64;
+                                reloc.sym     = nu_sec_syms[so as usize] as u32;
+                            } else {
+                                unreachable!();
+                            }
+                        }
+
+                        reloc.sym = symtab_remap.get_full(&(reloc.sym as usize))
+                            .expect("bug in elfkit: dangling reloc").0 as u32;
+                    }
+                },
+                _ => {},
+            }
+        }
+
+        self.sections[shndx].content = section::SectionContent::Symbols(
+            symtab_remap.into_iter().map(|(k,v)|v).collect());
+    }
+
+
 
     //TODO this code isnt tested at all
     //TODO the warnings need to be emited when calling store_all instead

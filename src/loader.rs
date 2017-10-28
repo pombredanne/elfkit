@@ -2,16 +2,19 @@ extern crate ar;
 extern crate bit_vec;
 extern crate fnv;
 extern crate core;
+extern crate rayon;
 
-use self::ar::Archive;
-use self::bit_vec::BitVec;
+use {types, Header, Elf, Error, symbol, filetype, relocation, section};
 use std;
-use std::cell::RefCell;
-use std::fs::{File};
-use std::io::{Read, Seek, Cursor};
-use {types, Elf, Error, symbol, filetype};
-use self::fnv::FnvHasher;
+use std::io::{Read, Seek, Cursor, BufReader, SeekFrom};
 use std::hash::{Hash,Hasher};
+use std::fs::{File};
+use std::collections::HashMap;
+use std::cell::RefCell;
+use self::rayon::prelude::*;
+use self::fnv::FnvHasher;
+use self::bit_vec::BitVec;
+use self::ar::Archive;
 
 pub trait ReadSeekSend : Read + Seek + Send {}
 impl<T> ReadSeekSend for T where T: Read + Seek + Send{}
@@ -33,19 +36,37 @@ pub enum State {
         elf:     Elf,
         read:    RefCell<Box<ReadSeekSend>>,
         bloom:   BloomFilter,
+        symbols: Vec<symbol::Symbol>,
     },
     Object{
-        name:    String,
-        elf:     Elf,
+        name:     String,
+        symbols:  Vec<symbol::Symbol>,
+        header:   Header,
+        sections: Vec<(usize, section::Section, Vec<relocation::Relocation>)>,
     },
 }
 
+pub trait Loader {
+    fn load_if<E>(self, needles: &Vec<&[u8]>, e: &E) ->  (Vec<State>,Vec<State>)
+        where E: Fn(Error, String) -> Vec<State> + Sync;
+}
+
+impl Loader for Vec<State> {
+    fn load_if<E>(self, needles: &Vec<&[u8]>, e: &E) ->  (Vec<State>,Vec<State>)
+        where E: Fn(Error, String) -> Vec<State> + Sync
+    {
+        self.into_par_iter().flat_map(|l| l.load_if(needles, e))
+            .partition(|o| if let &State::Object{..} = o {false} else {true})
+    }
+}
+
+
 impl State {
     pub fn load_if<E> (mut self, needles: &Vec<&[u8]>, e: &E) -> Vec<State>
-        where E: Fn(Error, String) -> Vec<State>
+        where E: Fn(Error, String) -> Vec<State> + Sync
     {
         if needles.iter().map(|needle|self.contains(needle, BloomFilter::hash(needle))).any(|e|e==true) {
-            self.load(e).into_iter().flat_map(|s|s.load_if(needles, e)).collect()
+            self.load(e).into_par_iter().flat_map(|s|s.load_if(needles, e)).collect()
         } else {
             vec![self]
         }
@@ -67,30 +88,22 @@ impl State {
                 }
                 return false;
             },
-            &mut State::Elf{ref elf, ref bloom, ..} => {
+            &mut State::Elf{ref elf, ref bloom, ref symbols, ..} => {
                 if bloom.contains(&needle_hash) {
-                    for sec in &elf.sections {
-                        match sec.header.shtype {
-                            types::SectionType::SYMTAB |
-                                types::SectionType::DYNSYM => {
-                                    for sym in sec.content.as_symbols().unwrap().iter() {
-                                        match sym.bind {
-                                            types::SymbolBind::GLOBAL | types::SymbolBind::WEAK => {
-                                                match sym.shndx {
-                                                    symbol::SymbolSectionIndex::Undefined |
-                                                        symbol::SymbolSectionIndex::Absolute  => {},
-                                                    _ => {
-                                                        if sym.name == needle {
-                                                            return true;
-                                                        }
-                                                    },
-                                                }
-                                            },
-                                            _ => {},
+                    for sym in symbols.iter() {
+                        match sym.bind {
+                            types::SymbolBind::GLOBAL | types::SymbolBind::WEAK => {
+                                match sym.shndx {
+                                    symbol::SymbolSectionIndex::Undefined |
+                                        symbol::SymbolSectionIndex::Absolute  => {},
+                                    _ => {
+                                        if sym.name == needle {
+                                            return true;
                                         }
-                                    }
-                                },
-                            _ => {}
+                                    },
+                                }
+                            },
+                            _ => {},
                         }
                     }
                 }
@@ -104,14 +117,14 @@ impl State {
         match self {
             State::Error{name,error} => e(error,name),
             State::Path{name} => {
-                let f = match File::open(&name) {
+                let mut f = match File::open(&name) {
                     Err(e) => return vec![State::Error{
                         error: Error::from(e),
                         name:  name
                     }],
                     Ok(f) => f,
                 };
-                match filetype::filetype(&f) {
+                match filetype::filetype(&mut f) {
                     Ok(filetype::FileType::Unknown) => {
                         return vec![State::Error{
                             error:  Error::InvalidMagic,
@@ -146,7 +159,7 @@ impl State {
                 while let Some(entry) = archive.next_entry() {
                     let mut name = name.clone();
                     match &entry {
-                        &Ok(ref entry) => name += &(String::from(" (") + &entry.header().identifier() + ")"),
+                        &Ok(ref entry) => name += &(String::from("::") + &entry.header().identifier()),
                         _ => {},
                     };
 
@@ -160,16 +173,39 @@ impl State {
                 }
                 r
             },
-            State::Elf{name, mut elf, read, ..} => {
+            State::Elf{name, mut elf, read, symbols, ..} => {
                 if let Err(e) = elf.load_all(&mut *read.borrow_mut()) {
                     return vec![State::Error{
                         name:   name,
                         error:  e,
                     }]
                 }
+
+                let mut relocs : HashMap<usize, Vec<relocation::Relocation>> = HashMap::new();
+                for (i, sec) in elf.sections.iter_mut().enumerate() {
+                    if sec.header.shtype == types::SectionType::RELA {
+                        relocs.insert(sec.header.info as usize,
+                                    std::mem::replace(sec, section::Section::default())
+                                    .content.into_relocations().unwrap()
+                                    );
+                    }
+                }
+
+                let mut sections = Vec::new();
+                for (i, sec) in elf.sections.into_iter().enumerate() {
+                    match sec.header.shtype {
+                        types::SectionType::NULL | types::SectionType::STRTAB => {},
+                        _ => {
+                            sections.push((i, sec, relocs.remove(&i).unwrap_or_else(||Vec::new())));
+                        },
+                    }
+                }
+
                 vec![State::Object{
-                    name:   name,
-                    elf:    elf,
+                    name:       name,
+                    symbols:    symbols,
+                    header:     elf.header,
+                    sections:   sections,
                 }]
             },
             any => vec![any],
@@ -199,35 +235,49 @@ impl State {
 
         let mut bloom = BloomFilter::new(num_symbols);
 
+        let mut symbols = None;
         for i in 0..elf.sections.len() {
-            match elf.sections[i].header.shtype {
-                types::SectionType::SYMTAB |
-                    types::SectionType::DYNSYM => {
-                        for sym in elf.sections[i].content.as_symbols().unwrap().iter() {
-                            match sym.bind {
-                                types::SymbolBind::GLOBAL | types::SymbolBind::WEAK => {
-                                    match sym.shndx {
-                                        symbol::SymbolSectionIndex::Undefined |
-                                        symbol::SymbolSectionIndex::Absolute  => {},
-                                        _ => {
-                                            bloom.insert(&BloomFilter::hash(&sym.name));
-                                        },
-                                    }
-                                },
-                                _ => {},
+            if (elf.sections[i].header.shtype == types::SectionType::SYMTAB &&
+               elf.header.etype == types::ElfType::REL) ||
+               (elf.sections[i].header.shtype == types::SectionType::DYNSYM &&
+               elf.header.etype == types::ElfType::DYN) {
 
-                            }
-                        }
-                    },
-                _ => {}
+               if let Some(_) = symbols {
+                   return Err(Error::MultipleSymbolSections);
+               }
+
+               let syms = std::mem::replace(&mut elf.sections[i], section::Section::default())
+                   .content.into_symbols().unwrap();
+
+               for sym in syms.iter() {
+                   match sym.bind {
+                       types::SymbolBind::GLOBAL | types::SymbolBind::WEAK => {
+                           match sym.shndx {
+                               symbol::SymbolSectionIndex::Undefined |
+                                   symbol::SymbolSectionIndex::Absolute  => {},
+                               _ => {
+                                   bloom.insert(&BloomFilter::hash(&sym.name));
+                               },
+                           }
+                       },
+                       _ => {},
+
+                   }
+               }
+               symbols = Some(syms);
             }
         }
 
+        if let None = symbols {
+            return Err(Error::MissingSymtabSection);
+        }
+
         Ok(State::Elf{
-            name:   name,
-            elf:    elf,
-            read:   io,
-            bloom:  bloom,
+            name:    name,
+            elf:     elf,
+            read:    io,
+            bloom:   bloom,
+            symbols: symbols.unwrap(),
         })
     }
 

@@ -399,7 +399,6 @@ fn main() {
     types::SectionFlags::ALLOC,
     SectionContent::Strtab(Strtab::default()), 0,0));
 
-    out_elf.sync_all().unwrap();
     linker::relayout(&mut out_elf, 0x300).unwrap();
 
     sc_dynamic.extend(linker::dynamic(&out_elf).unwrap());

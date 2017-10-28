@@ -34,6 +34,16 @@ pub enum Error {
     SyncingUnloadedSection,
     WritingUnloadedSection,
     NoSymbolsInObject,
+    MultipleSymbolSections,
+    ConflictingSymbol{
+        sym:   String,
+        obj:   String,
+        con:   String,
+    },
+    UndefinedReference{
+        sym:    String,
+        obj:    String,
+    },
 }
 
 impl From<::std::io::Error> for Error {

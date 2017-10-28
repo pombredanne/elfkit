@@ -21,6 +21,7 @@ rayon = "0.8.2"
 bit-vec = "0.4.4"
 bloom = "0.3.2"
 fnv = "1.0.5"
+ordermap = "0.3.0"
 
 
 #ar = "0.3.1"
@@ -44,6 +45,10 @@ path="bin/findsym.rs"
 [[bin]]
 name="linktree"
 path="bin/linktree.rs"
+
+[[bin]]
+name="ld"
+path="bin/ld.rs"
 
 #[[bin]]
 #name="bolter"
